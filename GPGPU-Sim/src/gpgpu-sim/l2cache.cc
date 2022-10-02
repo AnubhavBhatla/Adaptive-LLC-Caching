@@ -57,6 +57,9 @@ mem_fetch *partition_mf_allocator::alloc(new_addr_type addr,
   return mf;
 }
 
+/*AB:
+'memory_partition_unit' arbitrates the DRAM channel among multiple sub partitions
+*/
 memory_partition_unit::memory_partition_unit(unsigned partition_id,
                                              const memory_config *config,
                                              class memory_stats_t *stats,
@@ -66,15 +69,25 @@ memory_partition_unit::memory_partition_unit(unsigned partition_id,
       m_stats(stats),
       m_arbitration_metadata(config),
       m_gpu(gpu) {
+  
+  /*AB: 
+  instantiate dram
+  */
   m_dram = new dram_t(m_id, m_config, m_stats, this, gpu);
 
   m_sub_partition = new memory_sub_partition
       *[m_config->m_n_sub_partition_per_memory_channel];
   for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
        p++) {
+    /*AB: 
+    assigning ID for each sub-partition
+    */
     unsigned sub_partition_id =
         m_id * m_config->m_n_sub_partition_per_memory_channel + p;
     m_sub_partition[p] =
+        /*AB: 
+        creating 'm_n_sub_partition_per_memory_channel' number of memory_sub_partition
+        */
         new memory_sub_partition(sub_partition_id, m_config, stats, gpu);
   }
 }
@@ -88,10 +101,16 @@ void memory_partition_unit::handle_memcpy_to_gpu(
       "Copy Engine Request Received For Address=%zx, local_subpart=%u, "
       "global_subpart=%u, sector_mask=%s \n",
       addr, p, global_subpart_id, mystring.c_str());
+  /*AB: 
+  what is happening here?
+  */
   m_sub_partition[p]->force_l2_tag_update(
       addr, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle, mask);
 }
 
+/*AB: 
+deletes previously instantiated dram and memory sub-partitions
+*/
 memory_partition_unit::~memory_partition_unit() {
   delete m_dram;
   for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
@@ -101,6 +120,9 @@ memory_partition_unit::~memory_partition_unit() {
   delete[] m_sub_partition;
 }
 
+/*AB: 
+no idea what thia 'arbitration_metadata' is supposed to do
+*/
 memory_partition_unit::arbitration_metadata::arbitration_metadata(
     const memory_config *config)
     : m_last_borrower(config->m_n_sub_partition_per_memory_channel - 1),
@@ -171,6 +193,9 @@ void memory_partition_unit::arbitration_metadata::print(FILE *fp) const {
           m_shared_credit_limit);
 }
 
+/*AB:
+checks if any of the sub-partitions are busy. If yes, then the function returns at True
+*/
 bool memory_partition_unit::busy() const {
   bool busy = false;
   for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
@@ -182,6 +207,9 @@ bool memory_partition_unit::busy() const {
   return busy;
 }
 
+/*AB:
+triggers the cache_cycle function for all sub-partitions
+*/
 void memory_partition_unit::cache_cycle(unsigned cycle) {
   for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
        p++) {
@@ -189,6 +217,9 @@ void memory_partition_unit::cache_cycle(unsigned cycle) {
   }
 }
 
+/*AB:
+not sure what this function is for
+*/
 void memory_partition_unit::visualizer_print(gzFile visualizer_file) const {
   m_dram->visualizer_print(visualizer_file);
   for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
@@ -207,15 +238,22 @@ bool memory_partition_unit::can_issue_to_dram(int inner_sub_partition_id) {
       "sub partition %d sub_partition_contention=%c has_dram_resource=%c\n",
       spid, (sub_partition_contention) ? 'T' : 'F',
       (has_dram_resource) ? 'T' : 'F');
-
+  
+  /*AB:
+  returns true if the given sup-partition has dram resources (credits) and does not have its dram L2 queue full
+  */
   return (has_dram_resource && !sub_partition_contention);
 }
 
+/*AB:
+converts global sub-partition ID to local ID
+*/
 int memory_partition_unit::global_sub_partition_id_to_local_id(
     int global_sub_partition_id) const {
   return (global_sub_partition_id -
           m_id * m_config->m_n_sub_partition_per_memory_channel);
 }
+
 
 void memory_partition_unit::simple_dram_model_cycle() {
   // pop completed memory request from dram and push it to dram-to-L2 queue
@@ -223,19 +261,26 @@ void memory_partition_unit::simple_dram_model_cycle() {
   if (!m_dram_latency_queue.empty() &&
       ((m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle) >=
        m_dram_latency_queue.front().ready_cycle)) {
+    //AB: returns a read/write reference to the data at the first element of the list
     mem_fetch *mf_return = m_dram_latency_queue.front().req;
-    if (mf_return->get_access_type() != L1_WRBK_ACC &&
+    if (mf_return->get_access_type() != L1_WRBK_ACC && //AB: L1 writeback access?
         mf_return->get_access_type() != L2_WRBK_ACC) {
+      //AB: sets m_type to Read or Write
       mf_return->set_reply();
 
+      //AB: get the global ID of the sub-partition
       unsigned dest_global_spid = mf_return->get_sub_partition_id();
+      //AB: convert global ID to local ID
       int dest_spid = global_sub_partition_id_to_local_id(dest_global_spid);
+      //AB: checking if translation was correct
       assert(m_sub_partition[dest_spid]->get_id() == dest_global_spid);
-      if (!m_sub_partition[dest_spid]->dram_L2_queue_full()) {
-        if (mf_return->get_access_type() == L1_WRBK_ACC) {
+      if (!m_sub_partition[dest_spid]->dram_L2_queue_full()) { //AB: if queue is empty
+        if (mf_return->get_access_type() == L1_WRBK_ACC) { //AB: how can this condition evaluate to true?
+          //AB: erase the request tracker as the request is now completed
           m_sub_partition[dest_spid]->set_done(mf_return);
           delete mf_return;
         } else {
+          //AB: pushes the partition into the dram_L2_queue
           m_sub_partition[dest_spid]->dram_L2_queue_push(mf_return);
           mf_return->set_status(
               IN_PARTITION_DRAM_TO_L2_QUEUE,
@@ -245,12 +290,16 @@ void memory_partition_unit::simple_dram_model_cycle() {
               "mem_fetch request %p return from dram to sub partition %d\n",
               mf_return, dest_spid);
         }
+        //AB: removes the front entry from the queue
         m_dram_latency_queue.pop_front();
       }
 
     } else {
+      //AB: triggers the set_done function on all sub-partitions in the memory partition unit
       this->set_done(mf_return);
+      //AB: deletes the request tracker
       delete mf_return;
+      //AB: removes the front entry from the queue
       m_dram_latency_queue.pop_front();
     }
   }
@@ -259,24 +308,34 @@ void memory_partition_unit::simple_dram_model_cycle() {
   // if( !m_dram->full(mf->is_write()) ) {
   // L2->DRAM queue to DRAM latency queue
   // Arbitrate among multiple L2 subpartitions
+
+  //AB: id of the last subpartition that borrowed credit
   int last_issued_partition = m_arbitration_metadata.last_borrower();
   for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
        p++) {
+    //AB: start assigning sub-partitions ID starting from the one next to the last subpartition that borrowed credit
     int spid = (p + last_issued_partition + 1) %
                m_config->m_n_sub_partition_per_memory_channel;
+    //AB: subpartition can issue to dram and L2_dram_queue is not empty (there is data to be)
     if (!m_sub_partition[spid]->L2_dram_queue_empty() &&
         can_issue_to_dram(spid)) {
+      //AB: points to the top entry in the L2_dram_queue
       mem_fetch *mf = m_sub_partition[spid]->L2_dram_queue_top();
+      //AB: if DRAM is full (number of writes pending >= dram_write_queue_size), then break out of the for loop
       if (m_dram->full(mf->is_write())) break;
 
+      //AB: pop the entry from the L2_dram_queue
       m_sub_partition[spid]->L2_dram_queue_pop();
       MEMPART_DPRINTF(
           "Issue mem_fetch request %p from sub partition %d to dram\n", mf,
           spid);
+
+      //AB: adding some delay              ***************IMPORTANT!!***************
       dram_delay_t d;
       d.req = mf;
       d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
                       m_config->dram_latency;
+      //AB: push back the request to the dram_latency_queue
       m_dram_latency_queue.push_back(d);
       mf->set_status(IN_PARTITION_DRAM_LATENCY_QUEUE,
                      m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
